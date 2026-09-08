@@ -1,208 +1,137 @@
-<div align="center">
+# Codenotch for Windows
 
-# Codenotch
+> **This is not the original project.** It is an unofficial Windows distribution of
+> [vinzdg/codenotch](https://github.com/vinzdg/codenotch), a macOS app. All the credit for the
+> idea, the design and the name goes to [@vinzdg](https://github.com/vinzdg); the Windows port
+> itself was written by [@Im-Midi](https://github.com/Im-Midi). This repository exists for one
+> reason only: **to ship a prebuilt installer**, because neither upstream repository publishes one.
+>
+> If you are on macOS, go to [the original repository](https://github.com/vinzdg/codenotch) instead.
 
-[![CI](https://github.com/vinzdg/codenotch/actions/workflows/ci.yml/badge.svg)](https://github.com/vinzdg/codenotch/actions/workflows/ci.yml)
-![Platform](https://img.shields.io/badge/platform-macOS%2026%2B-black)
-![Swift](https://img.shields.io/badge/swift-5-orange)
-![License](https://img.shields.io/badge/license-MIT-green)
+The usage notch sits on the edge of your screen and answers two questions at a glance:
+**how much of my AI allowance is left**, and **is Claude still working**.
 
-**A macOS app that pins a small black notch to a screen edge, showing how much
-of each coding assistant's usage limit you have burned — and whether it is
-still working, done, or waiting on you.**
+Same design language as the macOS original (inverse-rounded pill, colour-graded rings, hover card
+with per-window bars), rebuilt for Windows in Rust + Tauri 2 / WebView2.
 
-![Collapsed notch with hover tooltip](docs/design/frame-124-hover-tooltip.png)
+## Download
 
-</div>
+Grab the installer from the [Releases page](../../releases/latest) and run it. Nothing else to
+install — the WebView2 runtime ships with Windows 11.
 
-Hover a ring for its limit windows and when they reset. Claude's ring shows the
-same **current session** window Claude Code's own `/usage` leads with, so the
-two never disagree.
+The installer is **not code-signed**, so Windows SmartScreen will show a
+*"Windows protected your PC"* dialog. Click **More info → Run anyway** if you want to proceed.
+Code signing needs a paid certificate; if you would rather not trust an unsigned binary,
+[build it yourself](#build-from-source) — it is two commands.
 
-## Windows
+## What it shows
 
-A Windows port — Rust/Tauri 2, same design and providers — lives in [`windows/`](windows/README.md).
-
-## What it reads
-
-| Provider | Source | How |
+| Cell | Source | How it reads it |
 |---|---|---|
-| **Claude Code** | official | Claude Code's own `/usage`, asked of the installed `claude`. Falls back to the OAuth token in the login keychain, against the endpoint that command uses, when Claude Code isn't installed. |
-| **Cursor** | official | The editor's signed-in session in its local SQLite state, or the `cursor-agent` login in the keychain — no separate sign-in. |
-| **Codex** | official | ChatGPT's usage endpoint, using the local Codex sign-in. Shows the 5-hour and weekly limits when available. |
-| **Antigravity** | official where licensed, otherwise a request count | Antigravity's local language server first, then Google's quota endpoint; a plain count when neither will answer for the account. |
-| **GLM** | official | Z.ai's Coding Plan monitor endpoint, with a key borrowed from whichever coding tool already holds one — Claude Code's `settings.json`, ZCode, or OpenCode. |
-| **Grok** | official | The Grok CLI session in `~/.grok/auth.json`, against the same credits billing endpoint `/usage` uses. |
-| **OpenCode** | official | The Go plan's official usage endpoint, with the `opencode-go` key OpenCode itself stores on sign-in. |
-| **GitHub Copilot** | official | GitHub's Copilot quota endpoint, authenticated with the GitHub CLI session already on the Mac (`gh auth login`). |
+| **Claude** | `GET https://api.anthropic.com/api/oauth/usage` with the token Claude Code keeps in `~/.claude/.credentials.json` | Session / weekly windows, 429 back-off with a persisted deadline, stale readings dimmed with their age. A thin arc spins inside the ring while a Claude session is working, and pulses amber when one is waiting on you (Claude Code hooks + transcript watcher, desktop app included). |
+| **Codex** | `GET https://chatgpt.com/backend-api/wham/usage` with the session Codex keeps in `~/.codex/auth.json` (read only, never refreshed), falling back to the `rate_limits` snapshot in the newest rollout log | Live primary/secondary windows (5h + weekly on paid plans, a monthly window on free) while Codex is signed in; otherwise the last snapshot, marked stale by its own timestamp. |
+| **Cursor** | The editor's own session from `state.vscdb` → `cursor.com/api/usage-summary` | Included usage / API usage / on-demand, reset at billing-cycle end. Nothing to sign into: it borrows the editor's session, so there is only ever one account. |
+| **Antigravity** | The local `language_server` bridge (quota summary), then Google's Cloud Code API for licensed accounts, then a plain count of today's model turns | Honest degradation: a percentage only when one exists, a `~count` when it does not. |
 
-Codenotch never signs in anywhere. Every reading is borrowed from a credential
-or session a tool on your Mac already holds — install and sign in to any of
-them, and its ring appears. Switching a provider off in Settings stops its
-credential being read at all and forgets the readings taken from it; it does
-not sign you out of the tool that owns the account, and the row says so.
+Providers that are not installed simply do not get a cell. The providers the macOS app has and this
+one does not — GLM, Grok, Gemini, GitHub Copilot, OpenCode, Perplexity — are not ported yet.
 
-Settings lists the connected providers in the order the notch draws them, and
-you can drag one by its handle to move it. The order is remembered across
-launches. A provider you switch back on joins the end of that list rather than
-reclaiming an older position, so nothing you cannot currently see jumps ahead
-of something you placed deliberately.
+### The Claude cell needs the CLI signed in
 
-It also answers **"is it still working?"** — a thin arc spins inside a
-provider's ring while a session is busy, and becomes a pulsing amber ring when
-one is blocked waiting on you. Hover for every live session by name, where it
-is running, and what it wants.
+The Claude reading comes from the OAuth token in `~/.claude/.credentials.json`, which the Claude
+Code CLI writes when you sign in. Sign in to the desktop app only and that file stays a stub with an
+empty `accessToken`, so the cell shows session activity but no percentages. Run `claude` in a
+terminal and `/login` once to fill it in.
 
-Two Claude Code logins are two rings. Anyone who keeps a work account apart with
-`CLAUDE_CONFIG_DIR=~/.claude-work claude` gets a **Claude (work)** ring beside the
-personal one, with its own limits, its own sessions and its own row in Settings.
-Any `~/.claude-<slug>` directory Claude Code has run against is found at launch;
-the default `~/.claude` always comes first, the rest in alphabetical order, so the
-rings never swap places.
+The macOS app has a second route for this — it runs `claude "/usage"` and reads the output, so it
+needs no credential of its own — and that route is not ported here yet.
 
-## When a session ends
+## Tray menu
 
-The notch opens itself for five seconds when an agent stops working, or stops
-to ask you something, and sounds the system alert. Clicking it while it is open
-brings that session's application to the front.
+Refresh now, reset position, open data folder (`%APPDATA%\codenotch` — logs, persisted readings,
+icon overrides), start with Windows, install/uninstall Claude Code hooks.
 
-The app, not the tab. A session publishes its pid and nothing else — no window,
-no tab, no tty — so the app is found by walking up the process tree from the
-agent to whatever launched it. Choosing the *tab* inside that app needs the
-terminal's own scripting interface, and there is no general one: Terminal.app
-and iTerm2 can match a tab by tty, Warp and Ghostty publish no scripting
-dictionary at all. So the app is raised for everybody and the tooltip names the
-session, which leaves the last hop one keystroke rather than working for two
-terminals and silently doing nothing in a third.
+Installing the hooks rewrites `~/.claude/settings.json` to add seven event hooks. It backs the file
+up first (`settings.json.codenotch-bak-<timestamp>`) and leaves your own hooks alone, but it is an
+edit to a file you may care about — the "uninstall" entry in the same menu reverses it.
 
-Both halves switch off separately in Settings, because they fail differently:
-the peek is no use behind a full-screen window, and the sound is no use in a
-meeting. Each of the two events — finished, and waiting on you — picks its own
-sound there, with a preview button beside it.
+## Hiding a provider
 
-The sound is played as a file on the ordinary output rather than handed to
-`NSSound` as a system alert. A system alert goes through the interface
-sound-effects channel, which System Settings → Sound can switch off — and on a
-Mac where it is off, `NSSound.play()` reports success and nothing is heard.
+A provider that is installed still gets a cell. To leave one out, add its name to
+`hidden_providers` in `%APPDATA%\codenotch\config.json` and restart the app:
 
-Only *leaving* busy counts. A question being answered is not a piece of work
-ending, and a session whose file disappears mid-turn — which is what quitting
-Claude Code looks like — is not announced at all, since there is no window left
-to jump to. Nothing is announced from the first reading either: every session
-already running at launch arrives with no history, and treating that as a
-transition would ring once per open window on every start.
-
-## Alerts
-
-A provider's headline limit crossing **80%** — and reaching **100%** —
-becomes a system notification: once per crossing, never repeated while it
-stays crossed, and again only after the window has genuinely rolled over.
-Each provider can be muted from its own row in Settings, and macOS permission
-is asked on the first real alert rather than at launch.
-
-## Placement
-
-The notch lives on any of the four screen edges. Right and left keep a
-vertical column; top and bottom lay the readings out side by side. It pins
-itself to the *usable* edge, so a bottom notch rests on the Dock and follows
-when the Dock hides or moves. On a Mac with a hardware notch, the top
-placement takes its exact shape, so the two read as one rather than as a bar
-parked underneath it.
-
-At rest it is a small pill on the screen edge that unfolds when the pointer
-reaches it — configurable in Settings to always show, or to hide entirely.
-Settings live in an orb below the notch: an arc at rest, a gear on hover.
-
-In Settings → Appearance → Reset time, choose **Time remaining** for countdowns
-like "Resets in 3 Days 3h". **Reset date** keeps the reset date and time, with
-minutes shown when less than an hour remains.
-
-Appearance also carries the ring's accent colour. The device accent is the
-default; fixed presets are available for pink, red, orange, yellow, green,
-teal, blue, indigo, purple and off-white.
-
-The app itself can show a Dock icon, a menu bar icon, or neither.
-
-## Updates
-
-Codenotch updates itself. [Sparkle](https://sparkle-project.org) checks daily
-and installs in the background without prompting; Settings says so and can
-switch it off. Every update is EdDSA-signed, so nothing installs that wasn't
-built and signed by the maintainer.
-
-## Building
-
-```sh
-brew install xcodegen   # once
-make run                # generate, build, launch a Debug build
-make test               # unit tests
+```json
+{ "hidden_providers": ["antigravity"] }
 ```
 
-No signing identity is required for either. `make release` — which archives,
-notarizes, and produces a signed auto-update feed — needs a Developer ID
-certificate and an App Store Connect notary profile, and is only ever run by
-the maintainer to cut an official release. See
-[CONTRIBUTING.md](CONTRIBUTING.md). CI runs the same unit tests unsigned via
-`make test-ci`.
+Accepted names: `codex`, `cursor`, `antigravity`. A hidden provider is reported as `absent` — the
+same state the notch already uses for a provider that is not installed — so no cell is drawn and
+its poller never runs.
 
-Run with `CODENOTCH_DEMO=1` to see fixed sample data instead of live readings.
+## Build from source
 
-## Architecture
+Prerequisites: Rust (MSVC toolchain), Visual Studio Build Tools with the C++ workload, and the
+WebView2 runtime (already present on Windows 11).
 
-Every provider implements `UsageProvider` (`Sources/Providers/`) and declares
-its own `Fidelity` — `.official`, `.derived`, or `.manual` — so the UI never
-presents a guess as if a vendor had published it. `UsageStore`
-(`Sources/Model/`) polls them on a timer, keeps the last good reading across
-launches, and degrades every failure to a visible status rather than a
-made-up percentage.
-
-The notch itself works in one-dimensional **stack space** (`along`/`across`)
-regardless of which screen edge it's on; `NotchPlacement` is the only place
-that maps that back onto real screen coordinates. `NotchLayout` holds every
-measurement, quoted from `docs/design/frame-124-hover-tooltip.png` so the
-layout can be checked against the design frame directly.
-
-- Design spec: [`docs/specs/2026-08-28-usage-notch-design.md`](docs/specs/2026-08-28-usage-notch-design.md)
-- Implementation history: [`TASKS.md`](TASKS.md)
-
-## The honest caveat
-
-No vendor publishes a clean "your session limit is N% used" API for any of
-these tools. Each adapter reads whatever the owning app itself reads from —
-an internal endpoint, a local database, a language server's own RPC — and
-those can change without notice. Every adapter's response shape is pinned by
-tests, and every failure degrades to a visible status (`stale`, `needsAuth`,
-`error`) rather than an invented number.
-
-**Keychain:** Claude's readings do not use it where Claude Code is installed.
-Claude Code files a *new* keychain item on every token rotation, and the new
-item's access list does not carry this app, so an "Always Allow" granted
-against the old one stops working about an hour later — asking `claude` itself
-avoids the question entirely. Where the keychain is still the source (no
-Claude Code on the machine, or Antigravity), the app is signed with a stable
-Developer ID identity so a grant survives rebuilds, and the secret is read
-only when the owning app has actually changed it — checked via the item's
-modification date, which isn't behind the same access prompt as the
-credential — so a valid grant does not mean a prompt on every poll.
-
-**Rate limits:** Claude's endpoint returns 429 if polled too hard, with an
-unhelpful `Retry-After: 0`. The back-off treats that as a floor-raiser only —
-60s, doubling per consecutive 429, capped at 15 minutes — and the deadline is
-persisted, so relaunching during a penalty waits instead of spending an
-attempt on it. Polling drops to every 5 minutes when nothing is running, and
-right-clicking the notch offers **Refresh now**.
-
-**Logs:** the app has no window, so anything worth diagnosing goes to the
-unified log.
-
-```sh
-/usr/bin/log stream --predicate 'subsystem == "com.vinz.codenotch"' --level debug
+```powershell
+cargo build --release
+.\target\release\codenotch.exe          # pill appears on the right edge of the primary monitor
+.\target\release\codenotch.exe doctor   # self-diagnosis: credentials, data sources, icons, hooks
 ```
 
-## Contributing
+To build the installer instead of a bare exe:
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+```powershell
+cargo install tauri-cli --version "^2" --locked
+cargo build --release -p codenotch-hook
+copy target\release\codenotch-hook.exe target\release\codenotch-hook-x86_64-pc-windows-msvc.exe
+cd codenotch
+cargo tauri build
+```
+
+The hook is built first on purpose. `bundle.externalBin` in `codenotch/tauri.conf.json` asks for it
+under its target-triple name — that is what makes the installer drop `codenotch-hook.exe` next to
+`codenotch.exe`, exactly where `hooks_install.rs` looks for it — and `tauri-build` resolves that
+path while compiling the app, so building the whole workspace in one go fails on a clean tree.
+
+The first build takes a few minutes: `rusqlite` is compiled with the `bundled` feature, which
+builds the SQLite C sources from scratch.
+
+### Icons
+
+Provider marks are the SVGs from [`@lobehub/icons-static-svg`](https://github.com/lobehub/lobe-icons)
+(MIT), embedded unmodified — see `codenotch/glyphs/NOTICE.md`. Drop your own
+`claude|codex|cursor|gemini.svg` (or `.png`) into `%APPDATA%\codenotch\glyphs\` to override.
+The marks remain the trademarks of their owners.
+
+## Layout
+
+```
+.
+├── codenotch/          Tauri 2 app: window, tray, providers (usage.rs, codex.rs, cursor.rs, antigravity.rs),
+│   ├── src/            session engine (watcher.rs, state.rs, focus.rs), glyphs.rs, doctor.rs
+│   ├── ui/notch.html   the pill + hover card (single file, no framework)
+│   └── glyphs/         provider marks (+ NOTICE.md)
+├── codenotch-hook/     <5 ms hook messenger Claude Code calls; forwards events to the app
+└── docs/specs/         the upstream design spec this port follows
+```
+
+## Credits and relationship to upstream
+
+- **[vinzdg/codenotch](https://github.com/vinzdg/codenotch)** — the original macOS app, the design,
+  and the name. This repository keeps its full git history, so every upstream commit stays attributed.
+- **[Im-Midi/codenotch-windows](https://github.com/Im-Midi/codenotch-windows)** — the Rust/Tauri port,
+  contributed upstream as its `windows/` tree. No code was copied from the Swift app; the providers
+  were reimplemented from their documented behaviour and the wire formats. The session-detection
+  engine originated in [Im-Midi/Pac-Man](https://github.com/Im-Midi/Pac-Man) (MIT).
+- **This repository** — the same code with the macOS tree removed, plus CI that builds and publishes
+  the installer. No functional changes to the port.
+
+Bug reports about the app itself are better filed upstream. Issues with the installer or the build
+belong here.
 
 ## License
 
-[MIT](LICENSE) © 2026 Vinz
+MIT. `LICENSE` covers the Windows port (Im-Midi and contributors); `LICENSE-UPSTREAM` covers the
+material inherited from the original project, including the app icon. Third-party notices are in
+both files and in `codenotch/glyphs/NOTICE.md`.

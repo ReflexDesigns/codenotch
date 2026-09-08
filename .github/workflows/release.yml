@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    name: Build NSIS installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      # The hook has to exist before the app is compiled: tauri-build resolves
+      # bundle.externalBin at build time and fails when the file is missing. Its
+      # target-triple name is what makes the installer drop codenotch-hook.exe next
+      # to codenotch.exe — exactly where hooks_install.rs looks for it.
+      - name: Build the hook
+        run: cargo build --release --locked -p codenotch-hook
+
+      - name: Name the hook for externalBin
+        run: copy target\release\codenotch-hook.exe target\release\codenotch-hook-x86_64-pc-windows-msvc.exe
+
+      - name: Bundle
+        run: cargo tauri build
+        working-directory: codenotch
+
+      - name: Publish the installer
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/bundle/nsis/*.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true

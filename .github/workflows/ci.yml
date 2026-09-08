@@ -6,27 +6,28 @@ on:
   pull_request:
 
 jobs:
-  test:
-    name: Unit tests
-    # macOS 26, because that is what the app targets. An older image ships an
-    # Xcode that cannot read the project at all — `objectVersion 77` is a
-    # format it does not know — long before it gets as far as the macOS 26
-    # deployment target or the Liquid Glass APIs the settings panel uses.
-    runs-on: macos-26
+  build:
+    name: Build
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      # Printed rather than assumed: when this job fails on a runner image
-      # change, the toolchain is the first thing worth seeing.
-      - name: Show toolchain
-        run: |
-          xcodebuild -version
-          xcrun --show-sdk-version
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      # Keyed on Cargo.lock; rusqlite's bundled SQLite is a C build that costs
+      # a couple of minutes when it is not cached.
+      - uses: Swatinem/rust-cache@v2
 
-      # Unsigned on purpose: no identity exists on a runner, and the tests
-      # read fixtures rather than keychains — see `make test-ci`.
-      - name: Run unit tests
-        run: make test-ci
+      # The hook goes first: tauri-build resolves bundle.externalBin while compiling
+      # the app, and that path is the hook under its target-triple name, so building
+      # the whole workspace in one go fails on a clean checkout.
+      - name: Build the hook
+        run: cargo build --release --locked -p codenotch-hook
+
+      - name: Name the hook for externalBin
+        run: copy target\release\codenotch-hook.exe target\release\codenotch-hook-x86_64-pc-windows-msvc.exe
+
+      # No clippy gate on top: this tree is upstream code, and failing the build
+      # on its lints would only produce red crosses nobody here is going to fix.
+      - name: Build the app
+        run: cargo build --release --locked
