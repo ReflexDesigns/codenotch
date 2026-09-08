@@ -151,7 +151,6 @@ pub fn run() -> String {
         }
     }
     recent_files(&dirs::config_dir().unwrap_or_default().join("Claude"), 2, 120, &mut recent);
-    recent_files(&dirs::config_dir().unwrap_or_default().join("Cursor").join("User").join("globalStorage"), 1, 120, &mut recent);
     recent.sort();
     for (age, p) in recent.iter().take(60) {
         o += &format!("  {age:>4}s ago  {}\n", p.display());

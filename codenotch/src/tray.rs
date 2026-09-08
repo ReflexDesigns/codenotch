@@ -101,8 +101,6 @@ fn handle(app: &AppHandle, id: &str) {
             }
             crate::usage::request_refresh();
             crate::codex::request_refresh();
-            crate::cursor::request_refresh();
-            crate::antigravity::request_refresh();
             let a = app.clone();
             std::thread::spawn(move || crate::reload_glyphs(&a));
         }

@@ -21,7 +21,8 @@ pub struct Config {
     /// Vertical position of the notch: the window centre as a fraction of the primary monitor's height (0 = top, 1 = bottom), default 0.5; saved after a drag
     #[serde(default = "default_notch_y")]
     pub notch_y: f64,
-    /// Providers to leave out of the notch even when they are installed: "codex", "cursor", "antigravity".
+    /// Providers to leave out of the notch even when they are installed. Only "codex" is
+    /// meaningful: Claude is the notch's reason to exist and has no switch.
     /// Edited by hand in config.json — there is no tray entry for it until someone asks for one.
     #[serde(default)]
     pub hidden_providers: Vec<String>,

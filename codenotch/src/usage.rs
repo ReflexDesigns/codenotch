@@ -52,7 +52,7 @@ pub struct LimitWindow {
     pub used: f64,
     /// Reset time, ms epoch (None = unknown)
     pub resets_at: Option<u64>,
-    /// Pure count window (no published denominator, e.g. Antigravity's requests today) — the cell shows ~N and the ring draws only its track
+    /// Pure count window (no published denominator, a number with no published denominator) — the cell shows ~N and the ring draws only its track
     #[serde(default)]
     pub count: Option<i64>,
     /// The number is ours, not the vendor's (upstream fidelity=.derived) — the card adds a ~ prefix
@@ -128,6 +128,33 @@ pub fn probe_credentials() -> String {
         ),
         None => "credential: ~/.claude/.credentials.json not found (needsAuth; the desktop app may use another store — signing in once with the Claude Code CLI creates it)".into(),
     }
+}
+
+/// Base64 for the JWT payloads the providers hand out: accepts both alphabets and tolerates
+/// missing padding, which is what those tokens actually look like.
+pub(crate) fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u8;
+    for c in s.bytes() {
+        let sextet: u8 = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' | b'\n' | b'\r' | b' ' => continue,
+            _ => return None,
+        };
+        let v = sextet as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
 }
 
 fn parse_reset(v: &serde_json::Value) -> Option<u64> {

@@ -1,26 +1,21 @@
 //! "Is it working?" for the non-Claude providers (Claude's local sessions go through the hooks +
 //! transcript-watcher engine, not here).
 //!
-//! None of the three has a state field like Claude Code's, so each is labelled with whatever it
-//! can honestly provide (the same trade-off upstream made):
-//!   - Cursor: the `composerHeaders` rows (JSON) in the editor's `state.vscdb` — `unfinishedRunAt`
-//!     is set for the duration of a run and cleared when it ends; `hasBlockingPendingActions` /
-//!     `hasPendingPlan` = waiting on you. This is **real state**. The database is in WAL mode, so
-//!     it must be opened as a plain read-only connection (immutable ignores the WAL and shows the
-//!     world as of the last checkpoint).
+//! Neither has a state field like Claude Code's, so each is labelled with whatever it can honestly
+//! provide (the same trade-off upstream made):
 //!   - Codex: the desktop app keeps turn state in `thread_turns` inside
 //!     `~/.codex/thread_history_1.sqlite` (status = inProgress with an empty completed_at = running)
 //!     — real state. The CLI / VS Code extension fall back to classifying the last entry of the
 //!     rollout, with a silence threshold that depends on the entry type.
 //!   - Claude cloud sessions: no local transcript, so they are inferred from the desktop app's
 //!     network throughput (marked ~).
-//!   - Antigravity: transcript.jsonl is appended during a run (each step is written only once it
-//!     completes, so status is always DONE and useless); written within the last 45 s = working
-//!     (the model can think for a long time between steps, hence the wide window).
 //! Polled every 2 s (upstream cadence), broadcast only on change. Cost discipline: database
 //! connections stay open, nothing is re-queried unless the file's mtime changed, the rollout tail
 //! is re-read only when its mtime changed, PowerShell runs only occasionally to find the network
 //! process pid, and the thread runs at lowered priority.
+//!
+//! The SQLite plumbing (DbCache, open_ro) outlived the Cursor reader it was written for: Codex's
+//! own thread_history database is read the same way.
 
 use crate::AppState;
 use serde::Serialize;
@@ -28,11 +23,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 const INTERVAL: Duration = Duration::from_secs(2);
-const ANTIGRAVITY_STALE_MS: u64 = 45_000;
 
 #[derive(Clone, Serialize, Debug, PartialEq)]
 pub struct Activity {
-    /// Provider id other than claude: codex / cursor / gemini
+    /// Provider id other than claude; only codex reaches here
     pub provider: String,
     /// busy | waiting
     pub state: String,
@@ -61,8 +55,9 @@ fn mtime_ms(p: &std::path::Path) -> Option<u64> {
 
 
 /// Persistent connection + change gating: the query runs again only when the database file (or its
-/// -wal) changed mtime; otherwise the last result is reused. Cursor's state.vscdb is over 2 GB, and
-/// reopening it every 2 s for a table scan slowed the whole machine (typing lagged).
+/// -wal) changed mtime; otherwise the last result is reused. The gating is not a micro-optimisation
+/// — it was written for a multi-gigabyte editor database whose table scan every 2 s made typing lag,
+/// and it is what keeps a 2 s poll honest on any store that grows.
 struct DbCache {
     path: std::path::PathBuf,
     conn: Option<rusqlite::Connection>,
@@ -111,7 +106,6 @@ impl DbCache {
 
 /// Everything the probe thread keeps between ticks
 struct Ctx {
-    cursor: DbCache,
     codex_turns: DbCache,
     codex_names: Option<rusqlite::Connection>,
     rollout_path: Option<std::path::PathBuf>,
@@ -124,7 +118,6 @@ impl Ctx {
     fn new() -> Self {
         let home = dirs::home_dir().unwrap_or_default();
         Self {
-            cursor: DbCache::new(crate::cursor::store_url().unwrap_or_default()),
             codex_turns: DbCache::new(home.join(".codex").join("thread_history_1.sqlite")),
             codex_names: None,
             rollout_path: None,
@@ -135,7 +128,7 @@ impl Ctx {
     }
 }
 
-// ---------------- Cursor ----------------
+// ---------------- SQLite helpers ----------------
 
 fn open_ro(path: &std::path::Path) -> Option<rusqlite::Connection> {
     use rusqlite::OpenFlags;
@@ -143,48 +136,6 @@ fn open_ro(path: &std::path::Path) -> Option<rusqlite::Connection> {
         return None;
     }
     rusqlite::Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()
-}
-
-fn cursor_activity(ctx: &mut Ctx) -> Vec<Activity> {
-    ctx.cursor.refresh(|conn| {
-        let mut stmt = conn.prepare("SELECT value FROM composerHeaders WHERE isArchived = 0 ORDER BY recency DESC LIMIT 40").ok()?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).ok()?;
-        let mut out = Vec::new();
-        for json in rows.flatten() {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else { continue };
-            if v.get("composerId").and_then(|x| x.as_str()).is_none() {
-                continue;
-            }
-            let blocked = v.get("hasBlockingPendingActions").and_then(|x| x.as_bool()) == Some(true)
-                || v.get("hasPendingPlan").and_then(|x| x.as_bool()) == Some(true);
-            let running = v.get("unfinishedRunAt").and_then(|x| x.as_f64());
-            let state = if blocked {
-                "waiting"
-            } else if running.is_some() {
-                "busy"
-            } else {
-                continue; // forty idle past conversations are not forty things happening now
-            };
-            let since = running
-                .or_else(|| v.get("lastUpdatedAt").and_then(|x| x.as_f64()))
-                .or_else(|| v.get("createdAt").and_then(|x| x.as_f64()))
-                .map(|ms| ms as u64)
-                .unwrap_or_else(now_ms);
-            out.push(Activity {
-                provider: "cursor".into(),
-                state: state.into(),
-                name: v.get("name").and_then(|x| x.as_str()).unwrap_or("Untitled chat").to_string(),
-                detail: if blocked {
-                    "needs your input".into()
-                } else {
-                    v.get("subtitle").and_then(|x| x.as_str()).unwrap_or("Working").to_string()
-                },
-                since,
-            });
-        }
-        out.sort_by(|a, b| b.since.cmp(&a.since));
-        Some(out)
-    })
 }
 
 // ---------------- Codex ----------------
@@ -494,50 +445,22 @@ fn claude_activity() -> Vec<Activity> {
     }
 }
 
-// ---------------- Antigravity ----------------
-
-fn antigravity_activity() -> Vec<Activity> {
-    let Some(root) = dirs::home_dir().map(|h| h.join(".gemini").join("antigravity").join("brain")) else { return vec![] };
-    let Ok(rd) = std::fs::read_dir(&root) else { return vec![] };
-    let mut newest: Option<(String, u64)> = None;
-    for e in rd.flatten() {
-        let t = e.path().join(".system_generated").join("logs").join("transcript.jsonl");
-        let Some(m) = mtime_ms(&t) else { continue };
-        if newest.as_ref().map(|(_, n)| m > *n).unwrap_or(true) {
-            newest = Some((e.file_name().to_string_lossy().to_string(), m));
-        }
-    }
-    let Some((_, at)) = newest else { return vec![] };
-    if now_ms().saturating_sub(at) > ANTIGRAVITY_STALE_MS {
-        return vec![];
-    }
-    vec![Activity { provider: "gemini".into(), state: "busy".into(), name: "Antigravity".into(), detail: "Working".into(), since: at }]
-}
-
 // ---------------- Putting it together ----------------
 
 #[derive(Clone, Copy, Default)]
 pub struct Presence {
-    cursor: bool,
     codex: bool,
-    gemini: bool,
 }
 
 fn presence() -> Presence {
-    Presence { cursor: crate::cursor::present(), codex: crate::codex::present(), gemini: crate::antigravity::present() }
+    Presence { codex: crate::codex::present() }
 }
 
 fn read_all(p: Presence, ctx: &mut Ctx) -> Vec<Activity> {
     let mut all = Vec::new();
     all.extend(claude_activity());
-    if p.cursor {
-        all.extend(cursor_activity(ctx));
-    }
     if p.codex {
         all.extend(codex_activity(ctx));
-    }
-    if p.gemini {
-        all.extend(antigravity_activity());
     }
     all
 }

@@ -11,8 +11,6 @@ mod state;
 mod tray;
 mod usage;
 mod codex;
-mod cursor;
-mod antigravity;
 mod glyphs;
 mod activity;
 mod diag;
@@ -33,11 +31,9 @@ pub struct AppState {
     pub usage: Mutex<usage::UsageSnapshot>,
     /// Codex snapshot (same UsageSnapshot shape; status may also be none/absent)
     pub codex: Mutex<usage::UsageSnapshot>,
-    pub cursor: Mutex<usage::UsageSnapshot>,
-    pub antigravity: Mutex<usage::UsageSnapshot>,
     /// Provider glyph cache, collected at launch and again on a tray refresh
     pub glyphs: Mutex<std::collections::HashMap<String, glyphs::Glyph>>,
-    /// Working state of the non-Claude providers (Cursor reports it; Codex and Antigravity are inferred from recent writes)
+    /// Working state of Codex, inferred from recent writes to its rollout logs
     pub activity: Mutex<Vec<activity::Activity>>,
 }
 
@@ -258,13 +254,6 @@ fn refresh_usage(app: AppHandle) {
     }
     usage::request_refresh();
     codex::request_refresh();
-    cursor::request_refresh();
-    antigravity::request_refresh();
-}
-
-#[tauri::command]
-fn get_antigravity(state: tauri::State<AppState>) -> usage::UsageSnapshot {
-    state.antigravity.lock().unwrap().clone()
 }
 
 #[tauri::command]
@@ -300,34 +289,24 @@ fn open_data_dir() {
 }
 
 #[tauri::command]
-fn get_cursor(state: tauri::State<AppState>) -> usage::UsageSnapshot {
-    state.cursor.lock().unwrap().clone()
-}
-
-#[tauri::command]
 fn get_codex(state: tauri::State<AppState>) -> usage::UsageSnapshot {
     state.codex.lock().unwrap().clone()
 }
 
-/// A click on a cell opens that provider's usage page
+/// A click on a cell opens that provider's app, or its usage page when there is no app
 #[tauri::command]
 fn open_provider_page(provider: String) {
     // Process-name fragment to focus, executables to launch (under %LOCALAPPDATA%), site to fall back on.
-    // Codex has no desktop app, and Claude's is a packaged app with no fixed install path, so that one
-    // can be focused when it is already running but not started from here.
+    // Codex is a CLI with no window and no app, so it only ever opens its account page. Claude has
+    // two shapes on Windows: the packaged build, which can be focused but has no path to launch
+    // from, and the plain installer's, which has one.
     let (proc, exes, url): (&str, &[&str], &str) = match provider.as_str() {
         "codex" => ("", &[], "https://chatgpt.com/#settings/Account"),
-        "cursor" => (
-            "cursor",
-            &[r"Programs\cursor\Cursor.exe"],
-            "https://cursor.com/dashboard",
+        _ => (
+            "claude",
+            &[r"AnthropicClaude\claude.exe"],
+            "https://claude.ai/settings/usage",
         ),
-        "gemini" => (
-            "antigravity",
-            &[r"Programs\Antigravity\Antigravity.exe"],
-            "https://antigravity.google",
-        ),
-        _ => ("claude", &[], "https://claude.ai/settings/usage"),
     };
     // Focus before launch: clicking a cell for an app that is already open should raise its window,
     // not leave a second instance behind.
@@ -621,8 +600,6 @@ fn main() {
             cfg: Mutex::new(cfg),
             usage: Mutex::new(usage::load_persisted()),
             codex: Mutex::new(codex::load_persisted()),
-            cursor: Mutex::new(cursor::load_persisted()),
-            antigravity: Mutex::new(antigravity::load_persisted()),
             glyphs: Mutex::new(Default::default()),
             activity: Mutex::new(Vec::new()),
         })
@@ -630,8 +607,6 @@ fn main() {
             get_state,
             get_usage,
             get_codex,
-            get_cursor,
-            get_antigravity,
             get_glyphs,
             get_activity,
             open_data_dir,
@@ -657,32 +632,20 @@ fn main() {
             server::start(handle.clone(), port);
             watcher::start(handle.clone());
             usage::start(handle.clone());
-            // A hidden provider is reported as "absent", which is the same state the UI already
-            // uses for a provider that is not installed, so no cell is drawn and its poller never runs.
-            let hidden = handle.state::<AppState>().cfg.lock().unwrap().hidden_providers.clone();
-            let is_hidden = |p: &str| hidden.iter().any(|h| h.eq_ignore_ascii_case(p));
-            for (name, event) in [("codex", "codex"), ("cursor", "cursor"), ("antigravity", "antigravity")] {
-                if !is_hidden(name) {
-                    continue;
-                }
+            // Codex hidden is reported as "absent", the state the UI already uses for a provider
+            // that is not installed, so no cell is drawn and its poller never starts. Claude has no
+            // switch: a notch with nothing in it would be a blank pill.
+            let codex_hidden = {
                 let st = handle.state::<AppState>();
-                let slot = match name {
-                    "codex" => &st.codex,
-                    "cursor" => &st.cursor,
-                    _ => &st.antigravity,
-                };
+                let cfg = st.cfg.lock().unwrap();
+                cfg.hidden_providers.iter().any(|h| h.eq_ignore_ascii_case("codex"))
+            };
+            if codex_hidden {
                 let absent = usage::UsageSnapshot { status: "absent".into(), ..Default::default() };
-                *slot.lock().unwrap() = absent.clone();
-                let _ = handle.emit(event, &absent);
-            }
-            if !is_hidden("codex") {
+                *handle.state::<AppState>().codex.lock().unwrap() = absent.clone();
+                let _ = handle.emit("codex", &absent);
+            } else {
                 codex::start(handle.clone());
-            }
-            if !is_hidden("cursor") {
-                cursor::start(handle.clone());
-            }
-            if !is_hidden("antigravity") {
-                antigravity::start(handle.clone());
             }
             activity::start(handle.clone());
             // Collecting glyphs may read icon resources out of a few executables; do it off the main thread and push when done

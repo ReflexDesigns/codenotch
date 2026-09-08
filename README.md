@@ -30,11 +30,13 @@ Code signing needs a paid certificate; if you would rather not trust an unsigned
 |---|---|---|
 | **Claude** | `GET https://api.anthropic.com/api/oauth/usage` with the token Claude Code keeps in `~/.claude/.credentials.json` | Session / weekly windows, 429 back-off with a persisted deadline, stale readings dimmed with their age. A thin arc spins inside the ring while a Claude session is working, and pulses amber when one is waiting on you (Claude Code hooks + transcript watcher, desktop app included). |
 | **Codex** | `GET https://chatgpt.com/backend-api/wham/usage` with the session Codex keeps in `~/.codex/auth.json` (read only, never refreshed), falling back to the `rate_limits` snapshot in the newest rollout log | Live primary/secondary windows (5h + weekly on paid plans, a monthly window on free) while Codex is signed in; otherwise the last snapshot, marked stale by its own timestamp. |
-| **Cursor** | The editor's own session from `state.vscdb` → `cursor.com/api/usage-summary` | Included usage / API usage / on-demand, reset at billing-cycle end. Nothing to sign into: it borrows the editor's session, so there is only ever one account. |
-| **Antigravity** | The local `language_server` bridge (quota summary), then Google's Cloud Code API for licensed accounts, then a plain count of today's model turns | Honest degradation: a percentage only when one exists, a `~count` when it does not. |
 
-Providers that are not installed simply do not get a cell. The providers the macOS app has and this
-one does not — GLM, Grok, Gemini, GitHub Copilot, OpenCode, Perplexity — are not ported yet.
+Two cells, deliberately. This build tracks Anthropic and OpenAI only; the Cursor and Antigravity
+readers that the upstream port carries were removed here, along with everything the macOS app has
+and the port never had (GLM, Grok, Gemini, GitHub Copilot, OpenCode, Perplexity). If you want those,
+[the upstream port](https://github.com/Im-Midi/codenotch-windows) still has Cursor and Antigravity.
+
+A provider that is not installed gets no cell either way.
 
 ### The Claude cell needs the CLI signed in
 
@@ -45,6 +47,15 @@ terminal and `/login` once to fill it in.
 
 The macOS app has a second route for this — it runs `claude "/usage"` and reads the output, so it
 needs no credential of its own — and that route is not ported here yet.
+
+## Clicking a cell
+
+A click opens that provider's desktop app: its window is focused if it is already running, otherwise
+the app is launched, and the provider's website is the fallback for when there is no app to open.
+
+Codex is a CLI with no window, so its cell always opens the ChatGPT account page. Claude is focused
+whichever way it was installed; launching it works for the plain installer's build and not for the
+packaged one, which has no fixed path to start from.
 
 ## Tray menu
 
@@ -57,16 +68,16 @@ edit to a file you may care about — the "uninstall" entry in the same menu rev
 
 ## Hiding a provider
 
-A provider that is installed still gets a cell. To leave one out, add its name to
-`hidden_providers` in `%APPDATA%\codenotch\config.json` and restart the app:
+To leave Codex out even when it is installed, add it to `hidden_providers` in
+`%APPDATA%\codenotch\config.json` and restart the app:
 
 ```json
-{ "hidden_providers": ["antigravity"] }
+{ "hidden_providers": ["codex"] }
 ```
 
-Accepted names: `codex`, `cursor`, `antigravity`. A hidden provider is reported as `absent` — the
-same state the notch already uses for a provider that is not installed — so no cell is drawn and
-its poller never runs.
+`codex` is the only name that does anything: Claude is the notch's reason to exist and has no
+switch. A hidden provider is reported as `absent` — the state the notch already uses for one that is
+not installed — so no cell is drawn and its poller never starts.
 
 ## Build from source
 
@@ -101,14 +112,14 @@ builds the SQLite C sources from scratch.
 
 Provider marks are the SVGs from [`@lobehub/icons-static-svg`](https://github.com/lobehub/lobe-icons)
 (MIT), embedded unmodified — see `codenotch/glyphs/NOTICE.md`. Drop your own
-`claude|codex|cursor|gemini.svg` (or `.png`) into `%APPDATA%\codenotch\glyphs\` to override.
+`claude.svg` or `codex.svg` (or `.png`) into `%APPDATA%\codenotch\glyphs\` to override.
 The marks remain the trademarks of their owners.
 
 ## Layout
 
 ```
 .
-├── codenotch/          Tauri 2 app: window, tray, providers (usage.rs, codex.rs, cursor.rs, antigravity.rs),
+├── codenotch/          Tauri 2 app: window, tray, providers (usage.rs for Claude, codex.rs),
 │   ├── src/            session engine (watcher.rs, state.rs, focus.rs), glyphs.rs, doctor.rs
 │   ├── ui/notch.html   the pill + hover card (single file, no framework)
 │   └── glyphs/         provider marks (+ NOTICE.md)

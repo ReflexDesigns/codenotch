@@ -254,7 +254,7 @@ pub fn focus_app(needle: &str) -> bool {
             best = Some((h, area));
         }
     }
-    // A real main window is not 65 px across. Antigravity minimised to the tray still leaves a
+    // A real main window is not 65 px across. An Electron app minimised to the tray can still leave a
     // ~4 000 px² stub visible and titled, and raising that puts nothing on screen; below this
     // threshold the caller is better off launching the app, which focuses its own instance.
     const MIN_MAIN_WINDOW_AREA: i64 = 200 * 200;

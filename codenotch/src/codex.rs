@@ -139,7 +139,7 @@ struct Credential {
 /// Second JWT segment (base64url) → claims. Used only for labels and a local expiry hint; nothing is verified here — that is the server's job
 fn jwt_claims(token: &str) -> Option<serde_json::Value> {
     let part = token.split('.').nth(1)?;
-    let raw = crate::antigravity::b64_decode(part)?;
+    let raw = crate::usage::b64_decode(part)?;
     serde_json::from_slice(&raw).ok()
 }
 
