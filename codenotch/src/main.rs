@@ -312,18 +312,48 @@ fn get_codex(state: tauri::State<AppState>) -> usage::UsageSnapshot {
 /// A click on a cell opens that provider's usage page
 #[tauri::command]
 fn open_provider_page(provider: String) {
-    let url = match provider.as_str() {
-        "codex" => "https://chatgpt.com/#settings/Account",
-        "cursor" => "https://cursor.com/dashboard",
-        "gemini" => "https://antigravity.google",
-        _ => "https://claude.ai/settings/usage",
+    // Process-name fragment to focus, executables to launch (under %LOCALAPPDATA%), site to fall back on.
+    // Codex has no desktop app, and Claude's is a packaged app with no fixed install path, so that one
+    // can be focused when it is already running but not started from here.
+    let (proc, exes, url): (&str, &[&str], &str) = match provider.as_str() {
+        "codex" => ("", &[], "https://chatgpt.com/#settings/Account"),
+        "cursor" => (
+            "cursor",
+            &[r"Programs\cursor\Cursor.exe"],
+            "https://cursor.com/dashboard",
+        ),
+        "gemini" => (
+            "antigravity",
+            &[r"Programs\Antigravity\Antigravity.exe"],
+            "https://antigravity.google",
+        ),
+        _ => ("claude", &[], "https://claude.ai/settings/usage"),
     };
+    // Focus before launch: clicking a cell for an app that is already open should raise its window,
+    // not leave a second instance behind.
+    if !proc.is_empty() && focus::focus_app(proc) {
+        return;
+    }
+    if let Some(local) = dirs::data_local_dir() {
+        for rel in exes {
+            let exe = local.join(rel);
+            if exe.exists() {
+                shell_open(&exe.to_string_lossy());
+                return;
+            }
+        }
+    }
+    shell_open(url);
+}
+
+/// `start` with an empty title argument, detached and without a console window. Takes a URL or a path.
+fn shell_open(target: &str) {
     let mut cmd = std::process::Command::new("cmd");
-    cmd.args(["/C", "start", "", url]);
+    cmd.args(["/C", "start", "", target]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     let _ = cmd.spawn();
 }
@@ -457,14 +487,7 @@ fn log_js(msg: String) {
 
 #[tauri::command]
 fn open_usage_page() {
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.args(["/C", "start", "", "https://claude.ai/settings/usage"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    let _ = cmd.spawn();
+    shell_open("https://claude.ai/settings/usage");
 }
 
 #[tauri::command]

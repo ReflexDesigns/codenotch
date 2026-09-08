@@ -204,9 +204,16 @@ pub fn pid_hits_chain(pid: u32, chain: &[u32], maps: &ProcMaps) -> bool {
             .unwrap_or(false)
 }
 
-/// Focus the Claude desktop app's main window (the jump-back target for desktop sessions: the largest visible window whose process name contains claude)
-#[cfg(windows)]
+/// Focus the Claude desktop app's main window (the jump-back target for desktop sessions).
 pub fn focus_claude_desktop() -> bool {
+    focus_app("claude")
+}
+
+/// Focus the main window of a running app: the largest visible titled window whose process name
+/// contains `needle`. False means no such window exists, which is the caller's cue to launch the
+/// app or fall back to its website.
+#[cfg(windows)]
+pub fn focus_app(needle: &str) -> bool {
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, FlashWindowEx, GetWindowRect, GetWindowTextLengthW, GetWindowThreadProcessId,
@@ -232,7 +239,7 @@ pub fn focus_claude_desktop() -> bool {
         let Some(name) = maps.name.get(&pid) else {
             continue;
         };
-        if !name.contains("claude") || name.contains("codenotch") {
+        if !name.contains(needle) || name.contains("codenotch") {
             continue;
         }
         let mut r = RECT::default();
@@ -247,7 +254,11 @@ pub fn focus_claude_desktop() -> bool {
             best = Some((h, area));
         }
     }
-    let Some((h, _)) = best else {
+    // A real main window is not 65 px across. Antigravity minimised to the tray still leaves a
+    // ~4 000 px² stub visible and titled, and raising that puts nothing on screen; below this
+    // threshold the caller is better off launching the app, which focuses its own instance.
+    const MIN_MAIN_WINDOW_AREA: i64 = 200 * 200;
+    let Some((h, _)) = best.filter(|(_, area)| *area >= MIN_MAIN_WINDOW_AREA) else {
         return false;
     };
     unsafe {
@@ -269,6 +280,6 @@ pub fn focus_claude_desktop() -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn focus_claude_desktop() -> bool {
+pub fn focus_app(_needle: &str) -> bool {
     false
 }
