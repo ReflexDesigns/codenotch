@@ -543,14 +543,22 @@ fn read_once(rt: &mut Runtime, prev: &UsageSnapshot) -> UsageSnapshot {
     snap.fetched_at = latest.unwrap_or_else(now_ms);
     snap.windows = vec![LimitWindow {
         id: "requests".into(),
-        label: "Requests today · no limit published".into(),
+        // Just "Requests today": the ~ prefix and the empty ring already say this is a count
+        // rather than a quota, and the note explains why there is no percentage to show.
+        label: "Requests today".into(),
         used: 0.0,
         resets_at: None,
         count: Some(n as i64),
         derived: true,
     }];
+    // Reaching here means the bridge is down, and the bridge is the only route to the real
+    // number: cloudcode-pa refuses a direct ask from a personal account (403 #3501), while
+    // Antigravity's own language_server gets an answer for that same account. So the honest
+    // report is "not running", not "no quota exists" — the latter was simply false for an
+    // account whose Antigravity shows it a weekly limit, and it sent people looking for a
+    // Google-side problem that was not there.
     snap.note = match tier {
-        Some(t) => format!("{t} · Google publishes no quota for this account"),
+        Some(t) => format!("{t} · open Antigravity to read the quota"),
         None => "Open Antigravity to read its quota".into(),
     };
     snap
