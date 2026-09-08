@@ -16,8 +16,12 @@ with per-window bars), rebuilt for Windows in Rust + Tauri 2 / WebView2.
 
 ## Download
 
-Grab the installer from the [Releases page](../../releases/latest) and run it. Nothing else to
-install — the WebView2 runtime ships with Windows 11.
+**[Download the latest installer](https://github.com/ReflexDesigns/codenotch/releases/latest)**
+— run it and you are done. Nothing else to install: the WebView2 runtime ships with Windows 11.
+
+Every release is on the
+[releases page](https://github.com/ReflexDesigns/codenotch/releases), built by GitHub Actions
+from the tag it is named after.
 
 The installer is **not code-signed**, so Windows SmartScreen will show a
 *"Windows protected your PC"* dialog. Click **More info → Run anyway** if you want to proceed.

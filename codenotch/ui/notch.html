@@ -198,6 +198,9 @@ function renderRing(){
     glyph.classList.toggle('dim', !!(h && h.used>=1));
     wrap.classList.toggle('dim', staleOf(p.snap));
   }
+  // The window is click-through except over this rectangle, so it has to be re-reported whenever the
+  // pill changes shape (a cell appearing or leaving changes its height).
+  requestAnimationFrame(()=>invoke('report_pill',{rect:rectOf(pill)}).catch(()=>{}));
 }
 
 function resetCopy(ms){
@@ -295,6 +298,7 @@ function callq(cmd,args){ // invoke with visible failure: any command error is r
 }
 // Hot rectangles are reported in physical pixels (multiplied by this page's real DPR), so the Rust side does no conversion — WebView2's DPR and the window scale can disagree
 function rectOf(el){const r=el.getBoundingClientRect(),k=window.devicePixelRatio||1;return [r.left*k,r.top*k,r.width*k,r.height*k];}
+window.addEventListener('resize',()=>invoke('report_pill',{rect:rectOf(pill)}).catch(()=>{}));
 function armWatchdog(){
   requestAnimationFrame(()=>{ // wait one frame so renderCard's new content is laid out before measuring
     if(!card.classList.contains('show'))return;

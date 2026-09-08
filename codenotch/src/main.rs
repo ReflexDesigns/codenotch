@@ -343,6 +343,16 @@ fn shell_open(target: &str) {
 /// WebView2's DPR and the window's scale_factor can disagree (see report_dpr).
 static HOT: Mutex<Option<Vec<[f64; 4]>>> = Mutex::new(None);
 
+/// The pill's own rectangle (physical px, window-relative), reported on every render. The window is
+/// 340x460 but the pill only occupies a column on its right, and the rest has to let clicks through
+/// to whatever is underneath — so the watchdog needs to know where the pill is even when collapsed.
+static PILL: Mutex<Option<[f64; 4]>> = Mutex::new(None);
+
+#[tauri::command]
+fn report_pill(rect: [f64; 4]) {
+    *PILL.lock().unwrap() = Some(rect);
+}
+
 #[tauri::command]
 fn set_expanded(on: bool, rects: Option<Vec<[f64; 4]>>) {
     *HOT.lock().unwrap() = if on { Some(rects.unwrap_or_default()) } else { None };
@@ -397,62 +407,90 @@ fn report_dpr(app: AppHandle, dpr: f64, w: f64, h: f64) {
     }
 }
 
-/// WebView2's mouseleave is unreliable inside a NOACTIVATE transparent window — a cursor that
-/// leaves quickly often produces no WM_MOUSELEAVE, and the card stays up. Rather than trust DOM
-/// events, the Rust side watches the system cursor while the card is expanded and emits
-/// pointer_left once the cursor is outside; the page collapses after its 250 ms grace period.
-/// "Outside the window" is not the test, though: the window has a 340×460 transparent area, so
-/// the cursor is compared against the hot rectangles the page reports (pill, card, and the gap
-/// between them), and two consecutive misses (300 ms) count as leaving.
+/// One cursor poll, two jobs.
+///
+/// The first is click-through. The window is 340×460 but the notch only paints a column on its
+/// right, and a transparent pixel still swallows the click meant for whatever is behind it — a link
+/// two hundred pixels away from anything visible simply stopped working. So the window is
+/// ignore_cursor_events by default and input is switched back on only while the cursor is actually
+/// over the pill (or, once expanded, over the card as well). WebView2 sees no mouse events while
+/// the window is click-through, which is exactly why this has to be driven from a system-cursor
+/// poll rather than from DOM hover.
+///
+/// The second is collapsing. WebView2's mouseleave is unreliable inside a NOACTIVATE transparent
+/// window — a cursor that leaves quickly often produces no WM_MOUSELEAVE, and the card stays up —
+/// so pointer_left is emitted here once the cursor has missed the hot rectangles (pill, card, and
+/// the gap between them) five polls running, and the page collapses after its 250 ms grace period.
 fn start_pointer_watchdog(app: AppHandle) {
     std::thread::spawn(move || {
         let mut miss = 0u8;
+        // None until the first poll, so the first decision is always applied
+        let mut ignoring: Option<bool> = None;
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            let rects = match HOT.lock().unwrap().clone() {
-                Some(r) => r,
-                None => {
-                    miss = 0;
-                    continue;
-                }
-            };
+            std::thread::sleep(std::time::Duration::from_millis(60));
             let Some(w) = app.get_webview_window("notch") else { continue };
             let (Ok(pos), Ok(cur)) = (w.outer_position(), app.cursor_position()) else { continue };
-            // Cursor position relative to the window's top-left, in physical pixels; the hot rectangles are physical too, so no scale conversion
+            // Cursor relative to the window's top-left, in physical pixels; the reported rectangles are
+            // physical too, so no scale conversion happens here
             let lx = cur.x - pos.x as f64;
             let ly = cur.y - pos.y as f64;
             const PAD: f64 = 10.0;
+            let hit = |r: &[f64; 4]| {
+                lx >= r[0] - PAD && ly >= r[1] - PAD && lx < r[0] + r[2] + PAD && ly < r[1] + r[3] + PAD
+            };
             let in_window = w
                 .outer_size()
                 .map(|s| lx >= 0.0 && ly >= 0.0 && lx < s.width as f64 && ly < s.height as f64)
                 .unwrap_or(true);
-            let mut inside = in_window && rects.iter().any(|r| {
-                lx >= r[0] - PAD && ly >= r[1] - PAD && lx < r[0] + r[2] + PAD && ly < r[1] + r[3] + PAD
-            });
-            // The gap between hot rectangles (pill and card) counts as inside: use the bounding box of all of them
-            if !inside && in_window && rects.len() > 1 {
-                let x0 = rects.iter().map(|r| r[0]).fold(f64::MAX, f64::min);
-                let y0 = rects.iter().map(|r| r[1]).fold(f64::MAX, f64::min);
-                let x1 = rects.iter().map(|r| r[0] + r[2]).fold(f64::MIN, f64::max);
-                let y1 = rects.iter().map(|r| r[1] + r[3]).fold(f64::MIN, f64::max);
-                inside = lx >= x0 && ly >= y0 && lx < x1 && ly < y1;
+
+            let expanded = HOT.lock().unwrap().clone();
+            let inside = match &expanded {
+                Some(rects) => {
+                    let mut i = in_window && rects.iter().any(|r| hit(r));
+                    // The gap between pill and card counts as inside: use the bounding box of all of them
+                    if !i && in_window && rects.len() > 1 {
+                        let x0 = rects.iter().map(|r| r[0]).fold(f64::MAX, f64::min);
+                        let y0 = rects.iter().map(|r| r[1]).fold(f64::MAX, f64::min);
+                        let x1 = rects.iter().map(|r| r[0] + r[2]).fold(f64::MIN, f64::max);
+                        let y1 = rects.iter().map(|r| r[1] + r[3]).fold(f64::MIN, f64::max);
+                        i = lx >= x0 && ly >= y0 && lx < x1 && ly < y1;
+                    }
+                    i
+                }
+                // Collapsed: only the pill is worth taking the cursor for. No rectangle reported yet
+                // (the page has not rendered) means stay click-through rather than block the desktop.
+                None => in_window && PILL.lock().unwrap().as_ref().map(&hit).unwrap_or(false),
+            };
+
+            let want_ignore = !inside;
+            if ignoring != Some(want_ignore) {
+                let _ = w.set_ignore_cursor_events(want_ignore);
+                ignoring = Some(want_ignore);
             }
+
             static LOGGED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if LOGGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 12 {
                 applog(&format!(
-                    "watchdog: cursor_rel=({lx:.0},{ly:.0}) inside={inside} rects={rects:?} winpos=({},{})",
-                    pos.x, pos.y
+                    "watchdog: cursor_rel=({lx:.0},{ly:.0}) inside={inside} ignore={want_ignore} pill={:?} winpos=({},{})",
+                    PILL.lock().unwrap(),
+                    pos.x,
+                    pos.y
                 ));
             }
-            if inside {
-                miss = 0;
-            } else {
-                miss += 1;
-                if miss >= 2 {
+
+            if expanded.is_some() {
+                if inside {
                     miss = 0;
-                    *HOT.lock().unwrap() = None;
-                    let _ = app.emit("pointer_left", ());
+                } else {
+                    miss += 1;
+                    if miss >= 5 {
+                        miss = 0;
+                        *HOT.lock().unwrap() = None;
+                        let _ = app.emit("pointer_left", ());
+                    }
                 }
+            } else {
+                miss = 0;
             }
         }
     });
@@ -615,6 +653,7 @@ fn main() {
             refresh_usage,
             open_usage_page,
             set_expanded,
+            report_pill,
             report_dpr,
             log_js,
             focus_session,
@@ -626,6 +665,9 @@ fn main() {
             place_notch(&handle);
             noactivate(&handle);
             if let Some(w) = handle.get_webview_window("notch") {
+                // Click-through from the first frame: the watchdog switches input back on once the
+                // cursor reaches the pill, and until then nothing behind the window is blocked.
+                let _ = w.set_ignore_cursor_events(true);
                 let _ = w.show();
             }
             tray::setup(&handle)?;
