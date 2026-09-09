@@ -49,15 +49,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          zip=$(ls target/release/bundle/nsis/*-setup.nsis.zip)
+          # The NSIS updater artifact is the installer itself — the CLI signs the .exe, no zip wrapper
+          exe=$(ls target/release/bundle/nsis/*-setup.exe)
           ver="${GITHUB_REF_NAME#v}"
           # The .sig is one line of base64, so it drops into JSON without escaping
           cat > latest.json <<JSON
           {"version":"$ver",
            "pub_date":"$(date -u +%Y-%m-%dT%H:%M:%SZ)",
            "platforms":{"windows-x86_64":{
-             "signature":"$(cat "$zip.sig")",
-             "url":"https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$(basename "$zip")"}}}
+             "signature":"$(cat "$exe.sig")",
+             "url":"https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$(basename "$exe")"}}}
           JSON
           cat latest.json
 
@@ -66,8 +67,7 @@ jobs:
         with:
           files: |
             target/release/bundle/nsis/*.exe
-            target/release/bundle/nsis/*-setup.nsis.zip
-            target/release/bundle/nsis/*-setup.nsis.zip.sig
+            target/release/bundle/nsis/*-setup.exe.sig
             latest.json
           generate_release_notes: true
           fail_on_unmatched_files: true
