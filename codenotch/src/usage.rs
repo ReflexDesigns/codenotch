@@ -4,7 +4,7 @@
 //! Rules (upstream's discipline):
 //!   - the credential comes from Claude Code's own store (Windows: ~/.claude/.credentials.json), read only
 //!   - 401/403 → re-read the credential once and retry (Claude Code may have just refreshed the token) → still failing means needsAuth
-//!   - 429 → back off 60 s × 2^n capped at 15 min, Retry-After only raises it; the deadline is persisted
+//!   - 429 → back off 60 s × 2^n, Retry-After raises it, always capped at 5 min; the deadline is persisted
 //!   - never invent a percentage on failure: keep the last reading marked stale, and the UI shows how old it is
 //! Reply (snake_case): { limits:[{kind,percent,resets_at}], five_hour:{utilization,resets_at}, seven_day:{...} }
 //! limits is the forward-compatible main shape; five_hour/seven_day are merged in as a fallback (a window that just rolled over disappears from limits).
@@ -16,9 +16,9 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const POLL_ACTIVE_SECS: u64 = 60;
-const POLL_IDLE_SECS: u64 = 300;
+const POLL_IDLE_SECS: u64 = 120;
 const BACKOFF_BASE_SECS: u64 = 60;
-const BACKOFF_CAP_SECS: u64 = 900;
+const BACKOFF_CAP_SECS: u64 = 300;
 
 static REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -269,7 +269,23 @@ fn fetch_once(token: &str) -> Result<Vec<LimitWindow>, FetchErr> {
 
 fn backoff_secs(consecutive: u32, retry_after_floor: u64) -> u64 {
     let exp = BACKOFF_BASE_SECS.saturating_mul(1u64 << consecutive.min(4));
-    exp.clamp(BACKOFF_BASE_SECS, BACKOFF_CAP_SECS).max(retry_after_floor)
+    // ponytail: the cap wins over Retry-After. The endpoint answers 429 with Retry-After: 3600,
+    // which used to freeze the reading for an hour at a time; one request per cap window costs
+    // nothing and keeps the ring from going hours stale.
+    exp.max(retry_after_floor).clamp(BACKOFF_BASE_SECS, BACKOFF_CAP_SECS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_never_exceeds_the_cap() {
+        assert_eq!(backoff_secs(0, 0), BACKOFF_BASE_SECS);
+        assert_eq!(backoff_secs(0, 3600), BACKOFF_CAP_SECS); // Retry-After raises, cap still holds
+        assert_eq!(backoff_secs(9, 0), BACKOFF_CAP_SECS);
+        assert!(backoff_secs(2, 120) >= BACKOFF_BASE_SECS);
+    }
 }
 
 fn set_and_broadcast(app: &AppHandle, mutate: impl FnOnce(&mut UsageSnapshot)) {
@@ -360,7 +376,7 @@ pub fn start(app: AppHandle) {
                     }
                 }
             }
-            // 60 s while a session is active, 300 s otherwise (upstream throttling discipline)
+            // 60 s while a session is active, 120 s otherwise
             let active = {
                 let st = app.state::<AppState>();
                 let store = st.store.lock().unwrap();

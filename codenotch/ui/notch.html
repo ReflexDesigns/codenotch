@@ -143,11 +143,11 @@ function providers(){
   if(codexSnap.status!=='absent') list.push({id:'codex',name:'Codex',glyph:'Cx',snap:codexSnap});
   return list;
 }
-function headlineOf(snap){
+function headlineOf(snap){ // the cell shows the short window (session / 5h) — the longer ones are in the hover card
   if(!snap.windows.length) return null;
   const metered=snap.windows.filter(w=>w.count==null);
-  if(metered.length) return metered.reduce((a,b)=> b.used>a.used?b:a);
-  return snap.windows[0];
+  // Both adapters put the short window first (Claude sorts session to the front, Codex lists primary then secondary)
+  return metered[0] || snap.windows[0];
 }
 function staleOf(snap){ if(snap.status==='stale') return true; return snap.fetched_at>0 && (Date.now()-snap.fetched_at)>5*60*1000; }
 let stateSnap={sessions:[],agg:'idle'};
@@ -159,15 +159,6 @@ function svgArc(r,frac,color,width,extra=''){
     transform="rotate(-90 28 28)" ${extra}/>`;
 }
 
-function headline(){ // the cell shows the most constrained window — the one that will stop you first
-  if(!usage.windows.length) return null;
-  return usage.windows.reduce((a,b)=> b.used>a.used?b:a);
-}
-
-function isStale(){
-  if(usage.status==='stale') return true;
-  return usage.fetched_at>0 && (Date.now()-usage.fetched_at)>5*60*1000;
-}
 
 function renderRing(){
   const ps=providers();
