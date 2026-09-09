@@ -15,6 +15,7 @@ mod glyphs;
 mod activity;
 mod diag;
 mod watcher;
+mod update;
 
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
@@ -627,6 +628,7 @@ fn main() {
     let port = cfg.port;
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Launching a freshly built exe while the old one is still running lands here: the new
             // instance is turned away and what stays on screen is the old process. Say so loudly.
@@ -674,6 +676,7 @@ fn main() {
             server::start(handle.clone(), port);
             watcher::start(handle.clone());
             usage::start(handle.clone());
+            update::start(handle.clone());
             // Codex hidden is reported as "absent", the state the UI already uses for a provider
             // that is not installed, so no cell is drawn and its poller never starts. Claude has no
             // switch: a notch with nothing in it would be a blank pill.
