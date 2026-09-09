@@ -1,6 +1,6 @@
 [package]
 name = "codenotch"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2021"
 description = "Codenotch for Windows — usage notch for Claude and Codex"
 license = "MIT"
