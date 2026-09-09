@@ -22,8 +22,11 @@ use tauri::{AppHandle, Emitter, Manager};
 
 /// Logical size of the notch window: the 70 pt pill column on the right plus room for the hover card on the left.
 pub const NOTCH_W: f64 = 340.0;
-/// Hand-bumped build tag, written to run.log at startup so a log can always be matched to the exe that wrote it.
-pub const BUILD: &str = "r31";
+/// The version the exe was built from, written to run.log at startup and shown in the hover card, so a
+/// running build can always be named. Taken from Cargo.toml rather than bumped by hand: a hand-bumped tag
+/// goes stale exactly when it matters, and an installer that silently keeps the old binary looks identical
+/// to one that worked.
+pub const BUILD: &str = env!("CARGO_PKG_VERSION");
 pub const NOTCH_H: f64 = 460.0; // 300 clipped the card once it held three window blocks plus the session list
 
 pub struct AppState {
@@ -497,6 +500,12 @@ fn start_pointer_watchdog(app: AppHandle) {
     });
 }
 
+/// The running build, for the hover card — the answer to "is this the version I just installed?"
+#[tauri::command]
+fn app_version() -> &'static str {
+    BUILD
+}
+
 /// Log channel for the page: JS writes key diagnostics into run.log (if invoke itself fails, the page reports on screen instead)
 #[tauri::command]
 fn log_js(msg: String) {
@@ -658,6 +667,7 @@ fn main() {
             report_pill,
             report_dpr,
             log_js,
+            app_version,
             focus_session,
             dismiss_session,
             set_lang

@@ -88,6 +88,7 @@
   .w-fill{height:100%;border-radius:2px}
   .w-used{font-size:11px;color:#808080}
   .c-note{font-size:12px;color:#c8c8c8;line-height:1.5;margin-top:6px}
+  .c-ver{font-size:10px;color:#606060;margin-top:10px;text-align:right}
   .c-sessions{margin-top:12px;border-top:1px solid #1e1e1e;padding-top:8px}
   .s-row{display:flex;align-items:center;gap:6px;font-size:11px;color:#b0b0b3;padding:2px 0}
   .s-dot{width:6px;height:6px;border-radius:3px;flex:0 0 auto}
@@ -213,6 +214,7 @@ function ago(ms){
 const STATE_DOT={running:RUNGREEN,attention:AMBER,done:'#57c7ff'};
 
 let hoverId='claude';
+let appVersion='';
 function renderCard(){
   const c=document.getElementById('card');
   const p=providers().find(x=>x.id===hoverId)||providers()[0];
@@ -260,6 +262,8 @@ function renderCard(){
       html+=`</div>`;
     }
   }
+  // Which build is on screen: an installer that quietly kept the old binary looks exactly like one that worked
+  html+=`<div class="c-ver">Codenotch ${esc(appVersion)||'?'}</div>`;
   c.innerHTML=html;
   placeCard();
 }
@@ -283,6 +287,7 @@ function showCard(){clearTimeout(hideTimer);card.classList.add('show');renderCar
 function hideCard(){card.classList.remove('show');invoke('set_expanded',{on:false,rects:null}).catch(()=>{});}
 function scheduleHide(){clearTimeout(hideTimer);hideTimer=setTimeout(hideCard,250);}
 // ===== Diagnostics + geometry =====
+invoke('app_version').then(v=>{appVersion=v;renderCard();}).catch(()=>{});
 function jslog(m){invoke('log_js',{msg:String(m)}).catch(()=>{});}
 function callq(cmd,args){ // invoke with visible failure: any command error is reported on screen (a silent .catch used to swallow them)
   return invoke(cmd,args).catch(e=>{notice(cmd+' failed: '+(e&&e.message||e));throw e;});

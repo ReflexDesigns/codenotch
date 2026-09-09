@@ -288,6 +288,15 @@ mod tests {
     }
 }
 
+/// One log line per distinct failure: the reason a reading is old has to be in run.log, but a poller in a
+/// long backoff must not drown the activity lines it sits next to.
+fn log_once(last: &mut String, note: String) {
+    if *last != note {
+        crate::applog(&format!("usage: {note}"));
+        *last = note;
+    }
+}
+
 fn set_and_broadcast(app: &AppHandle, mutate: impl FnOnce(&mut UsageSnapshot)) {
     let st = app.state::<AppState>();
     let snap = {
@@ -308,6 +317,8 @@ pub fn start(app: AppHandle) {
             let _ = app.emit("usage", &snap);
         }
         let mut consecutive_429: u32 = 0;
+        // Last logged failure, so a poller stuck for hours writes one line instead of one per tick
+        let mut last_note = String::new();
         loop {
             // No requests inside the backoff window
             let bu = {
@@ -321,10 +332,13 @@ pub fn start(app: AppHandle) {
                 continue;
             }
             match read_credentials() {
-                None => set_and_broadcast(&app, |u| {
-                    u.status = "needsAuth".into();
-                    u.note = "No Claude Code credential found".into();
-                }),
+                None => {
+                    log_once(&mut last_note, "no credential file".into());
+                    set_and_broadcast(&app, |u| {
+                        u.status = "needsAuth".into();
+                        u.note = "No Claude Code credential found".into();
+                    })
+                }
                 Some((token, expired)) => {
                     // On 401/403 re-read the credential and retry once (Claude Code may have just refreshed it)
                     let result = match fetch_once(&token) {
@@ -341,6 +355,10 @@ pub fn start(app: AppHandle) {
                     };
                     match result {
                         Ok(windows) => {
+                            if consecutive_429 > 0 || !last_note.is_empty() {
+                                crate::applog(&format!("usage: ok again after {last_note}"));
+                                last_note.clear();
+                            }
                             consecutive_429 = 0;
                             set_and_broadcast(&app, |u| {
                                 u.status = "ok".into();
@@ -350,13 +368,20 @@ pub fn start(app: AppHandle) {
                                 u.backoff_until = 0;
                             });
                         }
-                        Err(FetchErr::NeedsAuth) => set_and_broadcast(&app, |u| {
-                            u.status = "needsAuth".into();
-                            u.note = auth_note.into();
-                        }),
+                        Err(FetchErr::NeedsAuth) => {
+                            log_once(&mut last_note, format!("401/403 (credential expired={expired})"));
+                            set_and_broadcast(&app, |u| {
+                                u.status = "needsAuth".into();
+                                u.note = auth_note.into();
+                            })
+                        }
                         Err(FetchErr::RateLimited(ra)) => {
                             consecutive_429 += 1;
                             let wait = backoff_secs(consecutive_429 - 1, ra);
+                            log_once(
+                                &mut last_note,
+                                format!("429 (Retry-After {ra}s, #{consecutive_429}) → waiting {wait}s"),
+                            );
                             set_and_broadcast(&app, |u| {
                                 if !u.windows.is_empty() {
                                     u.status = "stale".into();
@@ -365,14 +390,17 @@ pub fn start(app: AppHandle) {
                                 u.backoff_until = now_ms() + wait * 1000;
                             });
                         }
-                        Err(FetchErr::Other(msg)) => set_and_broadcast(&app, |u| {
+                        Err(FetchErr::Other(msg)) => {
+                            log_once(&mut last_note, msg.clone());
+                            set_and_broadcast(&app, |u| {
                             if u.windows.is_empty() {
                                 u.status = "error".into();
                             } else {
                                 u.status = "stale".into();
                             }
                             u.note = msg;
-                        }),
+                            })
+                        }
                     }
                 }
             }
