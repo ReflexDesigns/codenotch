@@ -15,6 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 const ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
+const TOKEN_ENDPOINT: &str = "https://api.anthropic.com/v1/oauth/token";
+/// Claude Code's own OAuth client. The refresh grant answers invalid_client without it.
+const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const POLL_ACTIVE_SECS: u64 = 60;
 const POLL_IDLE_SECS: u64 = 120;
 const BACKOFF_BASE_SECS: u64 = 60;
@@ -94,8 +97,18 @@ fn persist(s: &UsageSnapshot) {
     }
 }
 
-/// Reads Claude Code's OAuth credential. Returns (token, expired hint).
-fn read_credentials() -> Option<(String, bool)> {
+/// Claude Code's OAuth credential, plus what is needed to renew it in place.
+struct Creds {
+    token: String,
+    refresh: Option<String>,
+    /// expiresAt is in the past — the token is spent even if the API has not said so yet
+    expired: bool,
+    path: std::path::PathBuf,
+    /// The file exactly as Claude Code wrote it, so a renewal can put back every field it owns
+    raw: String,
+}
+
+fn read_credentials() -> Option<Creds> {
     let home = dirs::home_dir()?;
     for name in [".credentials.json", "credentials.json"] {
         let p = home.join(".claude").join(name);
@@ -112,19 +125,126 @@ fn read_credentials() -> Option<(String, bool)> {
                 .and_then(|x| x.as_f64())
                 .map(|ms| (ms as u64) <= now_ms())
                 .unwrap_or(false);
-            return Some((tok.to_string(), expired));
+            return Some(Creds {
+                token: tok.to_string(),
+                refresh: oauth
+                    .get("refreshToken")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string),
+                expired,
+                path: p,
+                raw: text,
+            });
         }
     }
     None
 }
 
+/// Puts a renewed token into the credential JSON, leaving every other field exactly as Claude Code wrote
+/// it: the file is Claude Code's, and the notch may only move the three values it just renewed.
+fn merge_credentials(
+    raw: &str,
+    access: &str,
+    refresh: Option<&str>,
+    expires_at: u64,
+) -> Option<String> {
+    let mut v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let target = if v.get("claudeAiOauth").is_some() {
+        v.get_mut("claudeAiOauth")?
+    } else {
+        &mut v
+    };
+    let obj = target.as_object_mut()?;
+    obj.insert("accessToken".into(), access.into());
+    // The server rotates the refresh token on some renewals and omits it on others; dropping the old one
+    // when nothing came back would log the user out of Claude Code itself
+    if let Some(r) = refresh {
+        obj.insert("refreshToken".into(), r.into());
+    }
+    obj.insert("expiresAt".into(), serde_json::Value::from(expires_at));
+    serde_json::to_string_pretty(&v).ok()
+}
+
+/// Swaps the credential file for its renewed copy. The first renewal keeps a backup of the original and
+/// the new file lands by rename, so an interrupted write cannot leave Claude Code without a credential.
+fn write_credentials(path: &std::path::Path, original: &str, text: &str) -> std::io::Result<()> {
+    let bak = path.with_extension("json.codenotch-bak");
+    if !bak.exists() {
+        let _ = std::fs::write(&bak, original);
+    }
+    let tmp = path.with_extension("json.codenotch-tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Spends the refresh token for a new access token. Returns (access, rotated refresh, expiry ms).
+fn refresh_grant(refresh: &str) -> Result<(String, Option<String>, u64), String> {
+    let resp = ureq::post(TOKEN_ENDPOINT)
+        .set("content-type", "application/json")
+        .timeout(Duration::from_secs(20))
+        .send_json(serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+            "client_id": OAUTH_CLIENT_ID,
+        }));
+    let v: serde_json::Value = match resp {
+        Ok(r) => r.into_json().map_err(|e| format!("parse: {e}"))?,
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            return Err(format!(
+                "HTTP {code}: {}",
+                body.chars().take(200).collect::<String>()
+            ));
+        }
+        Err(e) => return Err(format!("{e}")),
+    };
+    let access = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .ok_or("reply has no access_token")?
+        .to_string();
+    let rotated = v
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    // A reply without expires_in is treated as already expired rather than trusted forever
+    let expires_at = v
+        .get("expires_in")
+        .and_then(|x| x.as_u64())
+        .map(|s| now_ms() + s * 1000)
+        .unwrap_or_else(now_ms);
+    Ok((access, rotated, expires_at))
+}
+
+/// Renews the credential after the API has rejected it. Returns the fresh access token.
+fn renew(c: &Creds) -> Option<String> {
+    let refresh = c.refresh.as_deref()?;
+    let (access, rotated, expires_at) = match refresh_grant(refresh) {
+        Ok(t) => t,
+        Err(e) => {
+            crate::applog(&format!("usage: renewal refused: {e}"));
+            return None;
+        }
+    };
+    match merge_credentials(&c.raw, &access, rotated.as_deref(), expires_at) {
+        Some(text) => match write_credentials(&c.path, &c.raw, &text) {
+            Ok(()) => crate::applog("usage: credential renewed"),
+            // The token works even if the file could not be replaced, so this poll still gets a reading
+            Err(e) => crate::applog(&format!("usage: renewed, but the file was not written: {e}")),
+        },
+        None => crate::applog("usage: renewed, but the credential file could not be merged"),
+    }
+    Some(access)
+}
+
 /// For doctor: credential probe report (prints no secret values)
 pub fn probe_credentials() -> String {
     match read_credentials() {
-        Some((tok, expired)) => format!(
-            "credential: found (token {} chars, {})",
-            tok.len(),
-            if expired { "expired — Claude Code refreshes it on its next use" } else { "valid" }
+        Some(c) => format!(
+            "credential: found (token {} chars, {}, refresh token {})",
+            c.token.len(),
+            if c.expired { "expired — renewed on the next poll" } else { "valid" },
+            if c.refresh.is_some() { "present" } else { "missing" }
         ),
         None => "credential: ~/.claude/.credentials.json not found (needsAuth; the desktop app may use another store — signing in once with the Claude Code CLI creates it)".into(),
     }
@@ -280,6 +400,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn merge_moves_the_three_renewed_values_and_nothing_else() {
+        let raw = r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"r1","expiresAt":1,"scopes":["user"],"subscriptionType":"pro"},"mcpOAuth":{"keep":true}}"#;
+        let out = merge_credentials(raw, "new", Some("r2"), 99).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["claudeAiOauth"]["accessToken"], "new");
+        assert_eq!(v["claudeAiOauth"]["refreshToken"], "r2");
+        assert_eq!(v["claudeAiOauth"]["expiresAt"], 99);
+        assert_eq!(v["claudeAiOauth"]["scopes"][0], "user");
+        assert_eq!(v["claudeAiOauth"]["subscriptionType"], "pro");
+        assert_eq!(v["mcpOAuth"]["keep"], true);
+    }
+
+    #[test]
+    fn merge_keeps_the_old_refresh_token_when_none_comes_back() {
+        let raw = r#"{"claudeAiOauth":{"accessToken":"old","refreshToken":"r1","expiresAt":1}}"#;
+        let out = merge_credentials(raw, "new", None, 42).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["claudeAiOauth"]["refreshToken"], "r1");
+        assert_eq!(v["claudeAiOauth"]["accessToken"], "new");
+    }
+
+    #[test]
     fn backoff_never_exceeds_the_cap() {
         assert_eq!(backoff_secs(0, 0), BACKOFF_BASE_SECS);
         assert_eq!(backoff_secs(0, 3600), BACKOFF_CAP_SECS); // Retry-After raises, cap still holds
@@ -339,19 +481,24 @@ pub fn start(app: AppHandle) {
                         u.note = "No Claude Code credential found".into();
                     })
                 }
-                Some((token, expired)) => {
-                    // On 401/403 re-read the credential and retry once (Claude Code may have just refreshed it)
-                    let result = match fetch_once(&token) {
+                Some(c) => {
+                    // On 401/403 re-read the file first (Claude Code may have just refreshed it), and spend
+                    // our own refresh token only when the file still holds the token that was rejected.
+                    let result = match fetch_once(&c.token) {
                         Err(FetchErr::NeedsAuth) => match read_credentials() {
-                            Some((t2, _)) if t2 != token => fetch_once(&t2),
-                            _ => Err(FetchErr::NeedsAuth),
+                            Some(c2) if c2.token != c.token => fetch_once(&c2.token),
+                            _ => match renew(&c) {
+                                Some(fresh) => fetch_once(&fresh),
+                                None => Err(FetchErr::NeedsAuth),
+                            },
                         },
                         other => other,
                     };
-                    let auth_note = if expired {
-                        "Credential expired — run any claude command (or chat with Claude) to refresh it"
+                    let expired = c.expired;
+                    let auth_note = if c.refresh.is_none() {
+                        "No refresh token — sign in with the Claude Code CLI"
                     } else {
-                        "Credential rejected (switched accounts?)"
+                        "Credential rejected and the renewal was refused — sign in with the Claude Code CLI"
                     };
                     match result {
                         Ok(windows) => {
